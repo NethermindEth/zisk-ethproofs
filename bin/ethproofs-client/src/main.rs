@@ -32,7 +32,7 @@ mod telegram;
 
 use crate::cliargs::CliArgs;
 use crate::state::AppState;
-use input::{process_inputs_from_folder, process_inputs_from_rpc};
+use input::{process_inputs_from_folder, process_inputs_from_nethermind, process_inputs_from_rpc};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -111,6 +111,9 @@ async fn main() -> Result<()> {
         }
         cliargs::InputGen::Folder => {
             process_inputs_from_folder(&mut app_state).await?;
+        }
+        cliargs::InputGen::Nethermind => {
+            process_inputs_from_nethermind(&mut app_state).await?;
         }
     }
     Ok(())

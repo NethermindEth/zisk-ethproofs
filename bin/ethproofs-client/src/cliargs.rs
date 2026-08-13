@@ -13,6 +13,13 @@ pub enum TelegramEvent {
 pub enum InputGen {
     Rpc,
     Folder,
+    Nethermind,
+}
+
+#[derive(Clone, Debug, ValueEnum, Eq, PartialEq, Hash)]
+pub enum ExecutorMode {
+    Assembly,
+    Emulator,
 }
 
 #[derive(Clone, Debug, ValueEnum, Eq, PartialEq, Hash)]
@@ -30,7 +37,7 @@ pub enum Commands {
 #[derive(Clone, Debug, Args)]
 #[command(next_help_heading = "Inputs generation")]
 pub struct InputsArgs {
-    /// Input generation mode: 'rpc' or 'folder'
+    /// Input generation mode: 'rpc', 'folder' or 'nethermind'
     #[arg(
         id = "input_mode",
         short = 'n',
@@ -40,7 +47,7 @@ pub struct InputsArgs {
     )]
     pub mode: InputGen,
 
-    /// Modulus to apply to select blocks in rpc input generation mode
+    /// Modulus to apply to select blocks in rpc/nethermind input generation modes
     #[arg(id = "input_block_modulus", long = "input.block-modulus", default_value_t = 1)]
     pub block_modulus: u64,
 
@@ -88,6 +95,25 @@ pub struct FolderArgs {
         num_args = 1..
     )]
     pub input_files: Vec<String>,
+}
+
+#[derive(Clone, Debug, Args)]
+#[command(next_help_heading = "Nethermind input generation")]
+pub struct NethermindArgs {
+    /// Path to the Nethermind StatelessInputGen binary (required in nethermind input mode)
+    #[arg(id = "nethermind_inputgen", long = "nethermind.inputgen")]
+    pub inputgen: Option<String>,
+
+    /// Attempt blocks whose header carries non-empty EIP-7685 execution requests.
+    /// By default they are skipped: StatelessInputGen cannot fetch execution requests
+    /// over JSON-RPC, so such blocks currently reconstruct with a wrong requestsHash
+    /// and fail stateless validation.
+    #[arg(
+        id = "nethermind_prove_request_blocks",
+        long = "nethermind.prove-request-blocks",
+        default_value_t = false
+    )]
+    pub prove_request_blocks: bool,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -297,6 +323,15 @@ pub struct CliArgs {
     #[arg(long, short = 't', default_value_t = 600)]
     pub prove_timeout: u64,
 
+    /// Executor used by the prover: 'assembly' (ASM emulator) or 'emulator' (Rust emulator)
+    #[arg(
+        id = "prover_executor",
+        long = "prover.executor",
+        value_enum,
+        default_value_t = ExecutorMode::Assembly
+    )]
+    pub prover_executor: ExecutorMode,
+
     /// Exit process with code 1 when proof generation fails
     #[arg(long)]
     pub exit_on_error: bool,
@@ -309,6 +344,9 @@ pub struct CliArgs {
 
     #[command(flatten)]
     pub folder: FolderArgs,
+
+    #[command(flatten)]
+    pub nethermind: NethermindArgs,
 
     #[command(flatten)]
     pub ethproofs: EthproofsArgs,
@@ -350,6 +388,14 @@ impl CliArgs {
             return Err(Self::command().error(
                 ErrorKind::ArgumentConflict,
                 "'--ethproofs.submit' cannot be used with '--input.mode folder'",
+            ));
+        }
+        // The nethermind input mode delegates input generation to an external
+        // StatelessInputGen binary, so its path is mandatory there.
+        if self.inputs.mode == InputGen::Nethermind && self.nethermind.inputgen.is_none() {
+            return Err(Self::command().error(
+                ErrorKind::MissingRequiredArgument,
+                "'--nethermind.inputgen' is required with '--input.mode nethermind'",
             ));
         }
         Ok(())

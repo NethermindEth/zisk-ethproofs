@@ -14,10 +14,15 @@ use ethproofs_common::protocol::BlockInfo;
 use zisk_sdk::ZiskStdin;
 
 use crate::{
-    process::{process_input, process_queued},
+    process::{process_input, process_input_stdin, process_queued},
     state::AppState,
     telegram::send_started_alert,
 };
+
+/// sha256 of an empty input: the EIP-7685 requestsHash of a block carrying no
+/// execution requests.
+const EMPTY_REQUESTS_HASH: &str =
+    "0xe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 /// Run process to generate input files by connecting to an Ethereum node via RPC
 pub(crate) async fn process_inputs_from_rpc(app_state: &mut AppState) -> Result<()> {
@@ -132,6 +137,221 @@ pub(crate) async fn process_inputs_from_rpc(app_state: &mut AppState) -> Result<
 
         warn!("Block subscription ended, reconnecting...");
     }
+}
+
+/// Run process to generate Nethermind guest inputs by delegating to the external
+/// StatelessInputGen tool. The tool emits a fully framed ZisK input file
+/// (`<block>.ssz`), so no host-side typed representation of the input exists —
+/// the file is loaded directly into a [`ZiskStdin`].
+pub(crate) async fn process_inputs_from_nethermind(app_state: &mut AppState) -> Result<()> {
+    let mut max_input_time: u128 = 0;
+    let mut min_input_time: u128 = u128::MAX;
+    let mut total_input_time: u128 = 0;
+    let mut input_count: u64 = 0;
+
+    let rpc_ws_url = app_state.cliargs.rpc.ws_url.clone();
+    let rpc_http_url = app_state.cliargs.rpc.http_url.clone();
+    let block_modulus = app_state.cliargs.inputs.block_modulus;
+    let inputgen = app_state
+        .cliargs
+        .nethermind
+        .inputgen
+        .clone()
+        .expect("nethermind.inputgen validated at startup");
+    let skip_request_blocks = !app_state.cliargs.nethermind.prove_request_blocks;
+    let inputs_folder = app_state.cliargs.inputs.folder.clone();
+
+    send_started_alert(app_state, "nethermind");
+
+    loop {
+        info!("Connecting to node WS RPC provider at {}", rpc_ws_url);
+        let provider = match Provider::<Ws>::connect(&rpc_ws_url).await {
+            Ok(p) => p,
+            Err(e) => {
+                error!("Failed to connect to node WS RPC provider, error: {}", e);
+                info!("Retrying in 5 seconds...");
+                sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+        info!("Connected to node WS RPC provider");
+
+        let mut stream = match provider.subscribe_blocks().await {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to subscribe to blocks, error {}", e);
+                info!("Retrying in 5 seconds...");
+                sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+        info!("Listening for new blocks on Ethereum Mainnet...");
+
+        while let Some(block) = stream.next().await {
+            let block_number = match block.number {
+                Some(n) => n.as_u64(),
+                None => {
+                    warn!("Block without number, skipping...");
+                    continue;
+                }
+            };
+
+            if block_number % block_modulus != 0 {
+                info!("Received block {}, skipping...", block_number);
+                continue;
+            }
+
+            info!("Received block {}, processing...", block_number);
+
+            // Fetch the block over HTTP for accurate metadata (the WS
+            // subscription only delivers headers) and its requestsHash.
+            let block_json = match fetch_block_json(&rpc_http_url, block_number).await {
+                Ok(b) => b,
+                Err(e) => {
+                    error!("Failed to fetch block {} over HTTP RPC: {}", block_number, e);
+                    continue;
+                }
+            };
+
+            // StatelessInputGen cannot fetch EIP-7685 execution requests over
+            // JSON-RPC, so request-bearing blocks reconstruct with a wrong
+            // requestsHash and fail stateless validation. Skip them BEFORE
+            // reporting queued, so no dangling queued proof is left behind.
+            if skip_request_blocks {
+                let requests_hash =
+                    block_json.get("requestsHash").and_then(|v| v.as_str()).unwrap_or("");
+                if !requests_hash.is_empty() && requests_hash != EMPTY_REQUESTS_HASH {
+                    warn!(
+                        "Block {} carries EIP-7685 execution requests (requestsHash {}), skipping...",
+                        block_number, requests_hash
+                    );
+                    continue;
+                }
+            }
+
+            process_queued(block_number, &app_state);
+
+            let tx_count = block_json
+                .get("transactions")
+                .and_then(|t| t.as_array())
+                .map(|t| t.len())
+                .unwrap_or(0);
+            let gas_used = block_json
+                .get("gasUsed")
+                .and_then(|v| v.as_str())
+                .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+                .unwrap_or(0);
+
+            let block_info = BlockInfo {
+                block_number,
+                timestamp: block.timestamp,
+                block_hash: block_json
+                    .get("hash")
+                    .and_then(|v| v.as_str())
+                    .map(|h| h.trim_start_matches("0x").to_string())
+                    .unwrap_or_else(|| "nohash".into()),
+                tx_count,
+                mgas: gas_used / 1_000_000,
+            };
+
+            info!("Generating input for block {} via StatelessInputGen", block_number);
+            let start_time = Instant::now();
+
+            let output = {
+                let _permit = app_state.calling_reth.acquire().await.unwrap();
+                tokio::process::Command::new(&inputgen)
+                    .args([
+                        "rpc",
+                        "--url",
+                        &rpc_http_url,
+                        "-b",
+                        &block_number.to_string(),
+                        "-o",
+                        &inputs_folder,
+                    ])
+                    .output()
+                    .await
+            };
+
+            let output = match output {
+                Ok(o) => o,
+                Err(e) => {
+                    error!(
+                        "Failed to run StatelessInputGen for block {}: {}, skipping...",
+                        block_number, e
+                    );
+                    continue;
+                }
+            };
+
+            if !output.status.success() {
+                error!(
+                    "StatelessInputGen failed for block {} (status {}): {}, skipping...",
+                    block_number,
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                continue;
+            }
+
+            let input_path = PathBuf::from(&inputs_folder).join(format!("{}.ssz", block_number));
+            let zisk_stdin = match ZiskStdin::from_file(&input_path) {
+                Ok(stdin) => stdin,
+                Err(e) => {
+                    error!(
+                        "Error opening generated input file {}: {}, skipping...",
+                        input_path.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            // The stdin holds the input in memory; the .ssz on disk is only
+            // kept on demand (the queued-next-block path re-saves it under the
+            // BlockInfo filename).
+            if !app_state.cliargs.inputs.keep {
+                if let Err(e) = fs::remove_file(&input_path) {
+                    warn!("Failed to remove input file {}: {}", input_path.display(), e);
+                }
+            }
+
+            let input_time = start_time.elapsed().as_millis();
+            total_input_time += input_time;
+            input_count += 1;
+            max_input_time = max_input_time.max(input_time);
+            min_input_time = min_input_time.min(input_time);
+
+            info!(
+                "Input generated for block {}, time: {} ms, avg: {} ms, max: {} ms, min: {} ms",
+                block_number,
+                input_time,
+                total_input_time / input_count as u128,
+                max_input_time,
+                min_input_time
+            );
+
+            process_input_stdin(block_info, zisk_stdin, app_state).await;
+        }
+
+        warn!("Block subscription ended, reconnecting...");
+    }
+}
+
+/// Fetch a block (transaction hashes only) as raw JSON over HTTP JSON-RPC.
+async fn fetch_block_json(http_url: &str, block_number: u64) -> Result<serde_json::Value> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "eth_getBlockByNumber",
+        "params": [format!("{:#x}", block_number), false],
+        "id": 1,
+    });
+    let response = reqwest::Client::new().post(http_url).json(&body).send().await?;
+    let json: serde_json::Value = response.json().await?;
+    json.get("result")
+        .filter(|r| !r.is_null())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no result for block {}: {}", block_number, json))
 }
 
 /// Run process to get input files from a folder

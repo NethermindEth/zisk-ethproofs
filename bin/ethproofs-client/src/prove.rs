@@ -7,6 +7,7 @@ use zisk_sdk::ProveResult;
 use zisk_sdk::ZiskStdin;
 use zisk_sdk::{ExecutorKind, ProofKind};
 
+use crate::cliargs::ExecutorMode;
 use crate::state::ZiskStdinWrapper;
 use crate::{
     db::BlockProof,
@@ -14,6 +15,13 @@ use crate::{
     telegram::{send_block_proved_alert, send_proof_failed_alert},
 };
 use ethproofs_common::protocol::BlockInfo;
+
+fn executor_kind(mode: &ExecutorMode) -> ExecutorKind {
+    match mode {
+        ExecutorMode::Assembly => ExecutorKind::Assembly,
+        ExecutorMode::Emulator => ExecutorKind::Emulator,
+    }
+}
 
 pub fn get_proof_b64(proof_data: &[u8]) -> Result<String> {
     Ok(general_purpose::STANDARD.encode(proof_data))
@@ -52,7 +60,7 @@ pub async fn generate_proof(block_info: BlockInfo, state: AppState) -> Result<St
                     .prove(&guest_program, ZiskStdin::new())
                     .hints(hints_stream)
                     .timeout(Duration::from_secs(state.cliargs.prove_timeout))
-                    .executor(ExecutorKind::Assembly)
+                    .executor(executor_kind(&state.cliargs.prover_executor))
                     .wrap(ProofKind::VadcopFinalMinimal)
                     .run()
             };
@@ -71,7 +79,7 @@ pub async fn generate_proof(block_info: BlockInfo, state: AppState) -> Result<St
                 prover_client
                     .prove(&guest_program, stdin.stdin)
                     .timeout(Duration::from_secs(state.cliargs.prove_timeout))
-                    .executor(ExecutorKind::Assembly)
+                    .executor(executor_kind(&state.cliargs.prover_executor))
                     .wrap(ProofKind::VadcopFinalMinimal)
                     .run()
 

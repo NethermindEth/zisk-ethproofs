@@ -56,6 +56,54 @@ target/release/ethproofs-client -s
           Panic when skipped blocks exceed the threshold
 ```
 
+### Nethermind guest (this fork)
+
+This fork adds an `--input.mode nethermind` that proves blocks with the
+[Nethermind ZisK guest](https://github.com/NethermindEth/nethermind/tree/master/src/Nethermind/Nethermind.Stateless.ZiskGuest).
+Input generation is delegated to Nethermind's `StatelessInputGen` tool, which emits a fully
+framed ZisK input (`<block>.ssz`) from any Nethermind node (>= 1.37) with the `Debug` JSON-RPC
+module enabled. The prover-side flow (coordinator, proof kinds, Ethproofs submission) is
+unchanged.
+
+Prerequisites:
+
+- A `zisk-coordinator` reachable at `--coordinator-url`. NOTE: stock ZisK v1.0.0-alpha cannot
+  prove the Nethermind guest due to two memory-witness bugs (fixes expected in v1.1.0-alpha);
+  until then the coordinator must be built from a patched tree
+  (see `zisk-mixed-mode.patch` in NethermindEth's ethproofs results, or ask the ZisK team).
+- `StatelessInputGen` published as a self-contained binary, same release as the guest ELF
+  (input format drifts between releases; tool and guest must be built from the same commit).
+- A Nethermind node with `--JsonRpc.EnabledModules` including `Debug`, WS enabled.
+
+Example:
+
+```bash
+target/release/ethproofs-client \
+  --guest ./elf/nethermind \
+  --input.mode nethermind \
+  --input.block-modulus 100 \
+  --nethermind.inputgen /usr/local/bin/StatelessInputGen \
+  --rpc.http-url http://node:8545 \
+  --rpc.ws-url ws://node:8545 \
+  --prover.executor emulator \
+  --ethproofs.submit \
+  --ethproofs.api-url https://staging--ethproofs.netlify.app/api/v0 \
+  --ethproofs.api-token $ETHPROOFS_API_TOKEN \
+  --ethproofs.cluster-id 1
+```
+
+Notes:
+
+- `--prover.executor emulator` selects the Rust emulator; the default (`assembly`) matches
+  upstream behavior but routes through the ASM planner, which cannot handle the Nethermind
+  guest on ZisK v1.0.0-alpha.
+- Blocks carrying non-empty EIP-7685 execution requests (~5% of mainnet) are skipped by
+  default (opt in to attempting them with `--nethermind.prove-request-blocks`):
+  `StatelessInputGen` cannot fetch execution requests over JSON-RPC yet, so those blocks
+  would fail stateless validation. The skip happens before the `queued` report, so no
+  dangling queued proofs are left on Ethproofs.
+- Hints mode (`zisk_hints`) is not supported with the Nethermind guest.
+
 ---
 
 ## Input Generator Server

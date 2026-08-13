@@ -200,13 +200,24 @@ pub(crate) async fn process_input(
     input_witness: &RethInputWitness,
     app_state: &mut AppState,
 ) {
-    let input_file_path =
-        PathBuf::from(&app_state.cliargs.inputs.folder).join(block_info.filename());
-    let block_number = block_info.block_number;
-
     let zisk_stdin = ZiskStdin::new();
     zisk_stdin.write(input_pk);
     zisk_stdin.write(input_witness);
+
+    process_input_stdin(block_info, zisk_stdin, app_state).await
+}
+
+/// Same as [`process_input`] but for inputs that are already fully framed as a
+/// [`ZiskStdin`] (e.g. the Nethermind guest input, produced by StatelessInputGen),
+/// with no guest-specific typed representation on the host.
+pub(crate) async fn process_input_stdin(
+    block_info: BlockInfo,
+    zisk_stdin: ZiskStdin,
+    app_state: &mut AppState,
+) {
+    let input_file_path =
+        PathBuf::from(&app_state.cliargs.inputs.folder).join(block_info.filename());
+    let block_number = block_info.block_number;
 
     // let zisk_input_ready = Arc::new(tokio::sync::Semaphore::new(0));
     // app_state.zisk_stdin_ready = Some(zisk_input_ready.clone());
