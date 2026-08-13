@@ -91,17 +91,21 @@ pub async fn generate_proof(block_info: BlockInfo, state: AppState) -> Result<St
                     prove_job_id = handle.job_id().map(|id| id.to_string()).unwrap_or_else(|| "N/A".to_string());
                     info!("🔄 Generating proof for block {}, job_id: {}", proved_block_number, prove_job_id);
 
+                    // Report to EthProofs that we are proving this block. Doing so
+                    // before awaiting the proof keeps the proving/proved reports
+                    // ordered: both are fire-and-forget tasks, and reporting them
+                    // back-to-back races the API's state transition (409 Conflict
+                    // when proved lands first).
+                    if let Some(client) = &ethproofs_client {
+                        client.proof_proving(ethproofs_cluster_id.unwrap(), proved_block_number);
+                    }
+
                     handle.await.map_err(|e| anyhow!(e))
                 }
                 Err(e) => {
                     Err(anyhow!("Failed to start proof generation for block {}: {}", proved_block_number, e))
                 }
             };
-
-            // Report to EthProofs that we are proving this block
-            if let Some(client) = &ethproofs_client {
-                client.proof_proving(ethproofs_cluster_id.unwrap(), proved_block_number);
-            }
 
             if let Ok(result) = &prove_result {
                 let proving_time_ms = result.get_proving_time();
