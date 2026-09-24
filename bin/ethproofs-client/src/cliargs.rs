@@ -103,17 +103,6 @@ pub struct NethermindArgs {
     /// Path to the Nethermind StatelessInputGen binary (required in nethermind input mode)
     #[arg(id = "nethermind_inputgen", long = "nethermind.inputgen")]
     pub inputgen: Option<String>,
-
-    /// Attempt blocks whose header carries non-empty EIP-7685 execution requests.
-    /// By default they are skipped: StatelessInputGen cannot fetch execution requests
-    /// over JSON-RPC, so such blocks currently reconstruct with a wrong requestsHash
-    /// and fail stateless validation.
-    #[arg(
-        id = "nethermind_prove_request_blocks",
-        long = "nethermind.prove-request-blocks",
-        default_value_t = false
-    )]
-    pub prove_request_blocks: bool,
 }
 
 #[derive(Clone, Debug, Args)]
