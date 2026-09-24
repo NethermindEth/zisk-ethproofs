@@ -19,11 +19,6 @@ use crate::{
     telegram::send_started_alert,
 };
 
-/// sha256 of an empty input: the EIP-7685 requestsHash of a block carrying no
-/// execution requests.
-const EMPTY_REQUESTS_HASH: &str =
-    "0xe3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-
 /// Run process to generate input files by connecting to an Ethereum node via RPC
 pub(crate) async fn process_inputs_from_rpc(app_state: &mut AppState) -> Result<()> {
     let mut max_input_time: u128 = 0;
@@ -158,7 +153,6 @@ pub(crate) async fn process_inputs_from_nethermind(app_state: &mut AppState) -> 
         .inputgen
         .clone()
         .expect("nethermind.inputgen validated at startup");
-    let skip_request_blocks = !app_state.cliargs.nethermind.prove_request_blocks;
     let inputs_folder = app_state.cliargs.inputs.folder.clone();
 
     send_started_alert(app_state, "nethermind");
@@ -204,7 +198,7 @@ pub(crate) async fn process_inputs_from_nethermind(app_state: &mut AppState) -> 
             info!("Received block {}, processing...", block_number);
 
             // Fetch the block over HTTP for accurate metadata (the WS
-            // subscription only delivers headers) and its requestsHash.
+            // subscription only delivers headers).
             let block_json = match fetch_block_json(&rpc_http_url, block_number).await {
                 Ok(b) => b,
                 Err(e) => {
@@ -212,22 +206,6 @@ pub(crate) async fn process_inputs_from_nethermind(app_state: &mut AppState) -> 
                     continue;
                 }
             };
-
-            // StatelessInputGen cannot fetch EIP-7685 execution requests over
-            // JSON-RPC, so request-bearing blocks reconstruct with a wrong
-            // requestsHash and fail stateless validation. Skip them BEFORE
-            // reporting queued, so no dangling queued proof is left behind.
-            if skip_request_blocks {
-                let requests_hash =
-                    block_json.get("requestsHash").and_then(|v| v.as_str()).unwrap_or("");
-                if !requests_hash.is_empty() && requests_hash != EMPTY_REQUESTS_HASH {
-                    warn!(
-                        "Block {} carries EIP-7685 execution requests (requestsHash {}), skipping...",
-                        block_number, requests_hash
-                    );
-                    continue;
-                }
-            }
 
             process_queued(block_number, &app_state);
 
